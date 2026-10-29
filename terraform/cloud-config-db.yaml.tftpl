@@ -1,22 +1,44 @@
 #cloud-config
+# Only the parameter name is included in user data, never the password.
 package_update: true
 packages:
   - mariadb-server
+  - python3-boto3
 
 write_files:
   - path: /etc/mysql/mariadb.conf.d/99-bind.cnf
     content: |
       [mysqld]
       bind-address = 0.0.0.0
-  - path: /root/init.sql
-    permissions: '0600'
-    content: |
-      CREATE DATABASE IF NOT EXISTS lnunotes;
-      CREATE USER IF NOT EXISTS 'lnu'@'10.0.%' IDENTIFIED BY '${db_pass}';
-      GRANT ALL PRIVILEGES ON lnunotes.* TO 'lnu'@'10.0.%';
-      FLUSH PRIVILEGES;
 
 runcmd:
   - systemctl restart mariadb
-  - mysql < /root/init.sql
-  - rm -f /root/init.sql
+  - |
+    python3 - <<'PY'
+    import re, time
+    import boto3
+
+    client = boto3.client("ssm", region_name="${region}")
+    for attempt in range(20):
+        try:
+            password = client.get_parameter(
+                Name="/2dv705/db_password", WithDecryption=True
+            )["Parameter"]["Value"]
+            break
+        except Exception as exc:
+            print("Waiting for SSM parameter access:", type(exc).__name__)
+            time.sleep(6)
+    else:
+        raise SystemExit("Could not read database password from SSM")
+    if not re.fullmatch(r"[A-Za-z0-9]{20,128}", password):
+        raise SystemExit("Use a 20-128 character alphanumeric database password")
+    import subprocess
+    sql = (
+        "CREATE DATABASE IF NOT EXISTS lnunotes;"
+        f"CREATE USER IF NOT EXISTS 'lnu'@'10.0.%' IDENTIFIED BY '{password}';"
+        f"ALTER USER 'lnu'@'10.0.%' IDENTIFIED BY '{password}';"
+        "GRANT ALL PRIVILEGES ON lnunotes.* TO 'lnu'@'10.0.%';"
+        "FLUSH PRIVILEGES;"
+    )
+    subprocess.run(["mysql"], input=sql.encode(), check=True)
+    PY

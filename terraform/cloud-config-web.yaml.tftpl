@@ -14,7 +14,6 @@ write_files:
     content: |
       DB_HOST=${db_host}
       DB_USER=lnu
-      DB_PASS=${db_pass}
       DB_NAME=lnunotes
       S3_BUCKET=${bucket}
       AWS_REGION=${region}
@@ -23,6 +22,33 @@ runcmd:
   - git clone ${repo} /opt/lnu-notes
   - python3 -m venv /opt/lnu-notes/.venv
   - /opt/lnu-notes/.venv/bin/pip install -r /opt/lnu-notes/requirements.txt
+  - |
+    /opt/lnu-notes/.venv/bin/python - <<'PY'
+    import re, time
+    import boto3
+
+    client = boto3.client("ssm", region_name="${region}")
+    for attempt in range(20):
+        try:
+            password = client.get_parameter(
+                Name="/2dv705/db_password", WithDecryption=True
+            )["Parameter"]["Value"]
+            break
+        except Exception as exc:
+            print("Waiting for SSM parameter access:", type(exc).__name__)
+            time.sleep(6)
+    else:
+        raise SystemExit("Could not read database password from SSM")
+    if not re.fullmatch(r"[A-Za-z0-9]{20,128}", password):
+        raise SystemExit("Use a 20-128 character alphanumeric database password")
+    import os
+    from pathlib import Path
+    path = Path("/etc/lnu-notes.env")
+    lines = [line for line in path.read_text().splitlines() if not line.startswith("DB_PASS=")]
+    lines.append("DB_PASS=" + password)
+    path.write_text("\n".join(lines) + "\n")
+    os.chmod(path, 0o600)
+    PY
   - install -m 644 /opt/lnu-notes/deploy/lnu-notes.service /etc/systemd/system/
   - systemctl daemon-reload
   - systemctl enable --now lnu-notes
